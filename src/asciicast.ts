@@ -1,42 +1,99 @@
-export interface Header {
-  /** Currently only version 2 is supported */
-  version: number
-  width: number
-  height: number
-
-  timestamp?: number
-  duration?: number
-  idle_time_limit?: number
-  command?: string
-  title?: string
-  env?: Record<string, string>
-  theme?: {
-    fg?: string
-    bg?: string
-    palette?: string
-  }
-}
-
 export const EventTypeOutput = "o";
 export const EventTypeInput = "i";
 export const EventTypeResize = "r";
 export const EventTypeMarker = "m";
 export const EventTypeQuit = "q";
 
-/**
-  Represents any kind of event
+export interface Header {
+  version: number;
+  width: number;
+  height: number;
 
-  @member timestamp is time since start of recording in seconds (float)
-*/
-export type Event<T = string, D = any> = [
-  timestamp: number,
-  type: T,
-  data: D
-];
-// export type EventOutput = Event<"o", string>;
-// export type EventInput = Event<"i", string>;
+  theme?: {
+    fg?: string;
+    bg?: string;
+    palette?: string;
+  };
 
-// /**
-//   Data is in format 'WxH' where 'W' and 'H' are new width and height of the terminal
-// */
-// export type EventResize = Event<"r", string>;
+  idle_time_limit?: number;
+  title?: string;
+}
+
+export interface Event {
+  /** time since last event in millis */
+  timestamp: number;
+
+  /** event type */
+  type: string;
+
+  /** event specific data */
+  data: any;
+}
+
+// TODO write tests for this
+export function parse_header_v2(input: string): Header {
+  const obj = JSON.parse(input);
+
+  return {
+    version: obj.version!,
+    width: obj.width!,
+    height: obj.height!,
+
+    // these are optional
+    theme: obj.theme,
+    idle_time_limit: obj.idle_time_limit, // TODO convert to millis as well
+    title: obj.title,
+  };
+}
+
+export function parse_events_v2(input: Array<string>): Array<Event> {
+  let time_offset = 0;
+  let events: Array<Event> = [];
+
+  for (let i = 0; i < input.length; i++) {
+    const obj = JSON.parse(input[i]);
+    events.push({
+      // NOTE: converting the timestamp to relative same as V3
+      timestamp: (obj[0]! - time_offset) * 1000,
+      type: obj[1]!,
+      data: obj[2]!,
+    });
+    time_offset = obj[0]!;
+  }
+
+  return events;
+}
+
+export class AsciicastFile {
+  header: Header;
+  events: Array<Event>;
+
+  constructor(header: Header, events: Array<Event>) {
+    this.header = header;
+    this.events = events;
+  }
+
+  static parse(input: string): AsciicastFile {
+    // the split leaves empty strings or "\r" strings
+    const lines = input.split("\n").filter((val) => {
+      const trimmed = val.trim();
+      // skip empty strings or comments (v3)
+      if (trimmed == "" || trimmed.startsWith("#")) {
+        return false;
+      }
+
+      return true;
+    });
+    const header_json: { version: number } = JSON.parse(lines[0]);
+    if (header_json.version == 2) {
+      return new AsciicastFile(
+        parse_header_v2(lines[0]),
+        parse_events_v2(lines.slice(1))
+      );
+    // } else if (header_json.version == 3) { // TODO
+
+    } else {
+      throw Error(`Invalid asciicast version '${header_json.version}'`);
+    }
+  }
+}

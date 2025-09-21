@@ -3,60 +3,13 @@ import { ImageAddon } from '@xterm/addon-image';
 
 import * as cast from './asciicast.ts';
 
-// export interface PlayerHTMLElement extends HTMLElement {
-//   src?: string;
-//   audio_src?: string;
-// }
-
-// export interface Header {
-//   version: number;
-//   width: number
-//   height: number
-
-//   timestamp?: number
-//   duration?: number
-//   idle_time_limit?: number
-//   title?: string
-
-//   // constructor(data: Header) {
-//   //   this = data;
-//   // }
-
-//   // constructor(json: cast.Header) {
-//   //   this.version = json.version;
-//   //   this.width = json.width;
-//   //   this.height = json.height;
-//   // }
-// }
-
-// export interface Event {
-//   time: number;
-//   type: string;
-//   data: any;
-// }
-
-// const x: EventX = {
-//   // date
-//   rel_time: 1,
-//   type: 'x',
-//   date: 2,
-// };
-
-// export type EventOutput = Event<"o", string>;
-// export type EventResize = Event<"r", string>;
-// export type EventMarker = Event<"m", string>;
-// export type EventExit = Event<"x", string>;
-
 export class AsciicastPlayer {
   readonly player: HTMLElement;
 
   /** xtermjs object */
   private terminal: Terminal;
 
-  /** is the player playing currently */
-  private playing: boolean = false;
-
-  /** which even is the next */
+  /** which event is the next (not the current one) */
   private index: number = 0;
 
   /** header of the file playing */
@@ -80,7 +33,7 @@ export class AsciicastPlayer {
   on_end = (_: this) => {};
 
   /** event when marker is reached */
-  on_marker = (_: this, event_index: number) => {};
+  on_marker = (_: this, _event_index: number) => {};
 
   /** event on any error */
   on_error = (_: this) => {};
@@ -106,26 +59,30 @@ export class AsciicastPlayer {
   }
 
   private execute_event(event: cast.Event) {
-    if (event[1] == cast.EventTypeOutput) {
-      this.terminal.write(event[2] as string);
-    } else if (event[1] == cast.EventTypeResize) {
-      const size = (event[2] as string).split("x");
+    if (event.type == cast.EventTypeOutput) {
+      this.terminal.write(event.data as string);
+    } else if (event.type == cast.EventTypeResize) {
+      const size = (event.data as string).split("x");
       const width = parseInt(size[0]);
       const height = parseInt(size[1]);
 
       this.terminal.resize(width, height);
-      console.log(`Resizing to ${width}x${height}`);
+      console.log(`Resizing to '${event.data}'`);
     } else {
-      console.log(`Ignorning event ${event}`);
+      console.log(`Ignorning event '${event.type}' '${event.timestamp}'`);
       // TODO im ignoring every other event
     }
   }
 
-  private queue_next() {
+  private queue_clear() {
     if (this.timeout_id) {
       clearTimeout(this.timeout_id);
       this.timeout_id = null;
     }
+  }
+
+  private queue_next() {
+    this.queue_clear();
 
     const event_index = this.index;
     const event = this.events[event_index];
@@ -136,16 +93,17 @@ export class AsciicastPlayer {
 
       // the end of file
       if (this.index >= this.events.length) {
-        this.playing = false;
+        this.queue_clear();
+
         // call on_end event
         this.on_end(this);
         return;
       }
 
-      if (this.playing) {
+      if (this.is_playing()) {
         this.queue_next();
       }
-    }, event[0] * 1000);
+    }, event.timestamp); // TODO clamp max wait time
   }
 
   is_playing() {
@@ -153,108 +111,79 @@ export class AsciicastPlayer {
   }
 
   play() {
-    // cannot play twice
-    if (this.playing) {
+    // cannot play twice or without any data
+    if (this.is_playing() || !this.header) {
       return;
-    }
-
-    this.playing = true;
-
-    // resize when playing from start
-    if (this.index == 0) {
-      this.terminal.resize(this.header!.width, this.header!.height);
     }
 
     this.queue_next();
   }
 
   pause() {
-    if (this.timeout_id) {
-      clearTimeout(this.timeout_id);
-      this.timeout_id = null;
+    this.queue_clear();
+  }
+
+  seek(index: number) {
+    // clamp the index just in case
+    if (index <= 0) {
+      index = 0;
+    } else if (index > this.events.length) {
+      index = this.events.length;
     }
 
-    this.playing = false;
-  }
-
-  reset() {
-    this.terminal.reset()
-    this.index = 0;
-  }
-
-  seek(index: number) { // TODO handle if player is playing at the moment
     console.log(`Seeking to index ${index}`);
 
-    if (this.timeout_id) {
-      clearTimeout(this.timeout_id);
-      this.timeout_id = null;
+    const was_playing = this.is_playing();
+
+    // stop playback
+    this.queue_clear();
+
+    const seeking_forward = this.index < index;
+    if (!seeking_forward) {
+      // clear the screen only when seeking backwards
+      this.terminal.clear()
     }
 
-    this.reset();
+    // do not rerun when seeking forward
+    const start = seeking_forward ? this.index : 0;
 
-    if (index > 0) {
-      for (let i = 0; i < index; i++) {
-        this.execute_event(this.events[i]);
-      }
-    } else {
-      this.terminal.resize(this.header!.width, this.header!.height);
+    for (let i = start; i < index; i++) {
+      this.execute_event(this.events[i]);
+    }
+
+    // set index wanted
+    this.index = index;
+
+    // if player was playing before seek resume
+    if (was_playing) {
+      this.queue_next();
     }
   }
 
-  // stop() {
-  //   this.playing = false;
-  //   this.seek(0);
-  // }
+  seek_rel(index: number) {
+    this.seek(this.index + index);
+  }
 
   async load_fetch(path: RequestInfo | URL): Promise<void> {
-    if (this.timeout_id) {
-      clearTimeout(this.timeout_id);
-      this.timeout_id = null;
-    }
+    this.queue_clear();
 
     this.header = null;
-    this.playing = false;
     this.index = 0;
 
-    return fetch(path)
-      .then(x => x.text())
-      .then(x => this.load(x))
-      .catch(x => {
-        console.error(`Failed to fetch ${path}: ${x}`);
-        // this.on_error
-      });
+    const resp = await fetch(path);
+    const text = await resp.text();
+
+    return this.load(text);
   }
 
   async load(data: string): Promise<void> {
-    const lines = data.split("\n");
-    const header = JSON.parse(lines[0]) as cast.Header; // TODO error handling?
+    const file = cast.AsciicastFile.parse(data);
 
-    // TODO parse both V2 and V3
+    // TODO: add this.file but for now just botch it in
+    this.events = file.events;
+    this.header = file.header;
 
-    let time_start = 0;
-
-    let events: Array<cast.Event> = [];
-    for (let i = 1; i < lines.length; i++) {
-      // ignore empty lines or comments
-      if (lines[i].trim() == "" || lines[i].trim().startsWith("#")) {
-        continue;
-      }
-
-      let event = JSON.parse(lines[i]) as cast.Event;
-
-      // converting all timestamps to relative to each other
-      const timestamp = event[0] - time_start;
-      time_start += timestamp;
-      event[0] = timestamp;
-
-      // TODO now just filtering out the known and useful event types
-      if (event[1] == cast.EventTypeOutput || event[1] == cast.EventTypeResize || event[1] == cast.EventTypeMarker) {
-        events.push(event);
-      }
-    }
-
-    this.events = events;
-    this.header = header;
+    this.terminal.resize(file.header.width, file.header.height);
   }
 }
 
@@ -262,90 +191,21 @@ const elem = document.getElementById('terminal')!;
 const player = new AsciicastPlayer(elem);
 player.load_fetch("/iterm2.cast")
   .then(() => player.play());
+  // .catch((x) => console.log(`got: ${x}`));
 
-// // TODO how do i a loop and sync with the progressbar?
-// function play(terminal: Terminal, text: String) {
-//   const lines = text.split("\n");
-//   const header = JSON.parse(lines[0]);
-//   console.log(header);
-
-//   // initial resize
-//   terminal.resize(header.width, header.height);
-
-//   // in unix timestamp format
-//   const time_start = parseInt(header.timestamp);
-
-//   for (let i = 1; i < lines.length; i++) {
-//     const line = lines[i];
-
-//     // ignore empty lines or comments
-//     if (line.trim() == "" || line.trim().startsWith("#")) {
-//       continue;
-//     }
-
-//     const event_raw: [string, string, any] = JSON.parse(line);
-//     const time = parseFloat(event_raw[0]);
-//     const event = event_raw[1];
-//     const data = event_raw[2];
-
-//     let action: Function;
-//     if (event == "o") {
-//       action = () => {
-//         terminal.write(data as string);
-//       };
-//       // delay the write by 400ms
-//       // setTimeout(() => {
-//       //     terminal.write(data as string);
-//       // }, time_sec * 1000);
-
-//       // handle_o(terminal, parseFloat(event[0]), event[2]);
-//     } else if (event == "r") {
-//       const size = (data as string).split("x");
-//       const width = parseInt(size[0]);
-//       const height = parseInt(size[1]);
-
-//       action = () => {
-//         terminal.resize(width, height);
-//         console.log(`Resizing to ${width}x${height}`);
-//       };
-
-//       // setTimeout(() => {
-//       //     terminal.resize(width, height);
-//       //     console.log(`Resizing to ${width}x${height}`);
-//       // }, time_sec * 1000);
-//     } else {
-//       // terminal.resize()
-//       console.log(`Ignoring event '${event}'`, data);
-//       continue;
-//     }
-
-//     // const time_now = Date.now();
-//     const diff = Date.now() - (time_start + time);
-//     if (diff <= 0) {
-//       action();
-//     } else {
-//       setTimeout(action, diff);
-//     }
-//   }
-//   // // file.parse
-//   // console.log(terminal, text)
-// }
-
-// const elem = document.getElementById('terminal');
-// if (elem == null) {
-//   console.error("Could not find #terminal element");
-// } else {
-//   var term = new Terminal();
-//   const imageAddon = new ImageAddon({
-//     iipSupport: true,
-//     sixelSupport: true,
-//   });
-//   term.loadAddon(imageAddon);
-
-//   term.open(elem);
-
-//   fetch("/iterm2.cast").then(r => r.text().then((txt) => {
-//     play(term, txt);
-//     // term.write(txt)
-//   }));
-// }
+document.getElementById('play')!
+  .onclick = () => {
+    if (player.is_playing()) {
+      player.pause();
+    } else {
+      player.play();
+    }
+  };
+document.getElementById('seekl')!
+  .onclick = () => {
+    player.seek_rel(-1);
+  };
+document.getElementById('seekr')!
+  .onclick = () => {
+    player.seek_rel(1);
+  };
