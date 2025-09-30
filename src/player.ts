@@ -1,5 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import { ImageAddon } from '@xterm/addon-image';
+import { FitAddon } from '@xterm/addon-fit';
 
 import * as cast from './asciicast.ts';
 
@@ -9,16 +10,15 @@ export class AsciicastPlayer {
   /** xtermjs object */
   private terminal: Terminal;
 
+  private fitAddon: FitAddon;
+
   /** which event is the next (not the current one) */
   private index: number = 0;
 
-  /** header of the file playing */
-  private header: cast.Header | null = null;
+  private file: cast.AsciicastFile | null = null;
 
   // private markers: Array<number> = [];
 
-  /** events from the file playing */
-  private events: Array<cast.Event> = [];
 
   /** time of the final event */
   // private duration: number = 0;
@@ -49,12 +49,15 @@ export class AsciicastPlayer {
 
     this.terminal = new Terminal();
 
-    // TODO add fit addon
     const imageAddon = new ImageAddon({
       iipSupport: true,
       sixelSupport: true,
     });
     this.terminal.loadAddon(imageAddon);
+
+    this.fitAddon = new FitAddon();
+    this.terminal.loadAddon(this.fitAddon);
+
     this.terminal.open(this.player as HTMLElement);
   }
 
@@ -67,10 +70,8 @@ export class AsciicastPlayer {
       const height = parseInt(size[1]);
 
       this.terminal.resize(width, height);
-      console.log(`Resizing to '${event.data}'`);
     } else {
-      console.log(`Ignorning event '${event.type}' '${event.timestamp}'`);
-      // TODO im ignoring every other event
+      console.log(`Ignorning event '${event.type}' at '${event.timestamp}'`);
     }
   }
 
@@ -82,17 +83,20 @@ export class AsciicastPlayer {
   }
 
   private queue_next() {
+    if (!this.file)
+      return;
+
     this.queue_clear();
 
     const event_index = this.index;
-    const event = this.events[event_index];
+    const event = this.file!.events[event_index];
 
     this.timeout_id = setTimeout(() => {
       this.execute_event(event);
       this.index = event_index + 1;
 
       // the end of file
-      if (this.index >= this.events.length) {
+      if (this.index >= this.file!.events.length) {
         this.queue_clear();
 
         // call on_end event
@@ -112,7 +116,7 @@ export class AsciicastPlayer {
 
   play() {
     // cannot play twice or without any data
-    if (this.is_playing() || !this.header) {
+    if (this.is_playing() || !this.file) {
       return;
     }
 
@@ -124,11 +128,14 @@ export class AsciicastPlayer {
   }
 
   seek(index: number) {
+    if (!this.file)
+      return;
+
     // clamp the index just in case
     if (index <= 0) {
       index = 0;
-    } else if (index > this.events.length) {
-      index = this.events.length;
+    } else if (index > this.file.events.length) {
+      index = this.file.events.length;
     }
 
     console.log(`Seeking to index ${index}`);
@@ -148,7 +155,7 @@ export class AsciicastPlayer {
     const start = seeking_forward ? this.index : 0;
 
     for (let i = start; i < index; i++) {
-      this.execute_event(this.events[i]);
+      this.execute_event(this.file.events[i]);
     }
 
     // set index wanted
@@ -167,7 +174,7 @@ export class AsciicastPlayer {
   async load_fetch(path: RequestInfo | URL): Promise<void> {
     this.queue_clear();
 
-    this.header = null;
+    this.file = null;
     this.index = 0;
 
     const resp = await fetch(path);
@@ -177,13 +184,11 @@ export class AsciicastPlayer {
   }
 
   async load(data: string): Promise<void> {
-    const file = cast.AsciicastFile.parse(data);
-
-    // TODO: add this.file but for now just botch it in
-    this.events = file.events;
-    this.header = file.header;
-
-    this.terminal.resize(file.header.width, file.header.height);
+    this.file = cast.AsciicastFile.parse(data);
+    this.file.events.forEach((x) => {
+      console.log(x.timestamp, x.type);
+    })
+    this.terminal.resize(this.file.header.width, this.file.header.height);
   }
 }
 
@@ -191,7 +196,6 @@ const elem = document.getElementById('terminal')!;
 const player = new AsciicastPlayer(elem);
 player.load_fetch("/iterm2.cast")
   .then(() => player.play());
-  // .catch((x) => console.log(`got: ${x}`));
 
 document.getElementById('play')!
   .onclick = () => {

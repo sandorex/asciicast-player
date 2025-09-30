@@ -64,6 +64,23 @@ export function parse_events_v2(input: Array<string>): Array<Event> {
   return events;
 }
 
+/// threshold in milliseconds to add output events together
+const OUTPUT_COMPRESS_THRESHOLD = 20;
+function process_events(input_events: Array<Event>): Array<Event> {
+  let events: Array<Event> = [input_events[0]];
+
+  for (let i = 1; i < input_events.length; i++) {
+    // if delay is less than 10ms and its output event then try to concat them
+    if (input_events[i].timestamp < OUTPUT_COMPRESS_THRESHOLD && input_events[i].type == EventTypeOutput && events[events.length - 1].type == EventTypeOutput) {
+      events[events.length - 1].data += input_events[i].data;
+    } else {
+      events.push(input_events[i]);
+    }
+  }
+
+  return events;
+}
+
 export class AsciicastFile {
   header: Header;
   events: Array<Event>;
@@ -84,16 +101,20 @@ export class AsciicastFile {
 
       return true;
     });
-    const header_json: { version: number } = JSON.parse(lines[0]);
-    if (header_json.version == 2) {
-      return new AsciicastFile(
-        parse_header_v2(lines[0]),
-        parse_events_v2(lines.slice(1))
-      );
-    // } else if (header_json.version == 3) { // TODO
 
+    const header_json: { version: number } = JSON.parse(lines[0]);
+    let header: Header | null = null;
+    let events: Array<Event> = [];
+
+    if (header_json.version == 2) {
+      header = parse_header_v2(lines[0]);
+      events = parse_events_v2(lines.slice(1));
     } else {
       throw Error(`Invalid asciicast version '${header_json.version}'`);
     }
+
+    events = process_events(events);
+
+    return new AsciicastFile(header, events);
   }
 }
